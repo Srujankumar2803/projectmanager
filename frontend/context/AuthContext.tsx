@@ -14,6 +14,7 @@ interface User {
 interface LoginCredentials {
   email: string;
   password: string;
+  secretCode?: string;
 }
 
 interface AuthContextType {
@@ -51,7 +52,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(credentials),
+        body: JSON.stringify({
+          email: credentials.email,
+          password: credentials.password,
+          secret_code: credentials.secretCode || null,
+        }),
       });
 
       if (!response.ok) {
@@ -81,8 +86,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       localStorage.setItem('token', access_token);
       localStorage.setItem('user', JSON.stringify(userData));
 
-      // Redirect to dashboard
-      router.push('/dashboard');
+      // Role-based redirect
+      if (userData.role === 'admin') {
+        router.push('/admin/dashboard');
+      } else if (userData.role === 'manager') {
+        router.push('/manager/dashboard');
+      } else {
+        router.push('/user/dashboard');
+      }
     } catch (error) {
       console.error('Login error:', error);
       throw error;
@@ -132,6 +143,47 @@ export function requireAuth<P extends object>(Component: React.ComponentType<P>)
     }
 
     if (!user) {
+      return null;
+    }
+
+    return <Component {...props} />;
+  };
+}
+
+export function requireRole<P extends object>(
+  Component: React.ComponentType<P>,
+  allowedRoles: string[]
+) {
+  return function RoleProtectedRoute(props: P) {
+    const { user, isLoading } = useAuth();
+    const router = useRouter();
+
+    useEffect(() => {
+      if (!isLoading) {
+        if (!user) {
+          router.push('/login');
+        } else if (!allowedRoles.includes(user.role)) {
+          // Redirect to appropriate dashboard based on role
+          if (user.role === 'admin') {
+            router.push('/admin/dashboard');
+          } else if (user.role === 'manager') {
+            router.push('/manager/dashboard');
+          } else {
+            router.push('/user/dashboard');
+          }
+        }
+      }
+    }, [user, isLoading, router]);
+
+    if (isLoading) {
+      return (
+        <div className="flex items-center justify-center min-h-screen">
+          <div className="text-lg">Loading...</div>
+        </div>
+      );
+    }
+
+    if (!user || !allowedRoles.includes(user.role)) {
       return null;
     }
 

@@ -73,8 +73,16 @@ async def login(
     """
     Login with email and password to receive an access token.
     
+    Auto-creates user if they don't exist (allows any random user to login).
+    
     - **email**: User's email address
-    - **password**: User's password
+    - **password**: User's password (will be set on first login)
+    - **secret_code**: Optional secret code for manager role assignment
+    
+    Role assignment logic:
+    - If email is "admin@example.com" → role is "admin"
+    - Else if secret_code is "manager" → role is "manager"
+    - Otherwise → role is "member" (normal user)
     
     Returns an access token to be used in Authorization header.
     """
@@ -82,27 +90,78 @@ async def login(
         # Find user by email
         user = db.query(User).filter(User.email == login_data.email).first()
         
+        # If user doesn't exist, create them automatically
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
+            # Extract username from email (part before @)
+            username = login_data.email.split('@')[0]
+            
+            # Check if username already exists
+            username_exists = db.query(User).filter(User.username == username).first()
+            if username_exists:
+                # Add a random suffix to make it unique
+                import random
+                username = f"{username}_{random.randint(1000, 9999)}"
+            
+            # Determine initial role
+            if login_data.email == "admin@example.com":
+                initial_role = UserRole.admin
+            elif login_data.secret_code == "manager":
+                initial_role = UserRole.manager
+            else:
+                initial_role = UserRole.member
+            
+            # Create new user
+            user = User(
+                username=username,
+                email=login_data.email,
+                password_hash=get_password_hash(login_data.password),
+                role=initial_role
             )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            
+            assigned_role = initial_role
+        else:
+            # Existing user - verify password
+            if not verify_password(login_data.password, user.password_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect email or password",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Dynamic role assignment based on login credentials
+            assigned_role = user.role  # Default to user's current role
+            
+            # Check if admin
+            if login_data.email == "admin@example.com":
+                assigned_role = UserRole.admin
+                # Update user role in database if not already admin
+                if user.role != UserRole.admin:
+                    user.role = UserRole.admin
+                    db.commit()
+            # Check if manager secret code provided
+            elif login_data.secret_code == "manager":
+                assigned_role = UserRole.manager
+                # Update user role in database if not already manager
+                if user.role != UserRole.manager:
+                    user.role = UserRole.manager
+                    db.commit()
+            # Otherwise, ensure user is a member (normal user)
+            else:
+                # If no secret code and not admin, ensure role is member
+                if user.role != UserRole.member and login_data.email != "admin@example.com":
+                    assigned_role = UserRole.member
+                    user.role = UserRole.member
+                    db.commit()
         
-        # Verify password
-        if not verify_password(login_data.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Create access token
+        # Create access token with assigned role
         access_token = create_access_token(
             payload={
                 "sub": str(user.id),
                 "email": user.email,
-                "role": user.role.value  # Convert enum to string
+                "role": assigned_role.value  # Use assigned role in token
             }
         )
         
